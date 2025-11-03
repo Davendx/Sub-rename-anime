@@ -8,13 +8,97 @@ from collections import defaultdict
 
 try:
     import anitopy
+    import requests
 except ImportError:
-    print("Anitopy library not found. Please install it using: pip install anitopy")
+    print("A required library was not found. Please install it using: pip install anitopy requests")
     sys.exit(1)
 
 VIDEO_EXTENSIONS = ['.mkv', '.mp4', '.avi', '.mov']
+import json
+
 SUBTITLE_EXTENSIONS = ['.srt', '.ass', '.sub']
 LOG_FILE = 'rename_script_log.txt'
+ANILIST_API_URL = 'https://graphql.anilist.co'
+ANILIST_CACHE_FILE = 'anilist_cache.json'
+
+# --- Caching ---
+
+def load_cache() -> Dict[str, any]:
+    """Loads the AniList search cache from a JSON file."""
+    if not os.path.exists(ANILIST_CACHE_FILE):
+        return {}
+    try:
+        with open(ANILIST_CACHE_FILE, 'r') as f:
+            return json.load(f)
+    except (json.JSONDecodeError, IOError):
+        # If the file is corrupted or unreadable, start with an empty cache
+        return {}
+
+def save_cache(cache: Dict[str, any]):
+    """Saves the AniList search cache to a JSON file."""
+    try:
+        with open(ANILIST_CACHE_FILE, 'w') as f:
+            json.dump(cache, f, indent=2)
+    except IOError as e:
+        print(f"\nWarning: Could not save AniList cache file: {e}")
+
+
+# --- AniList API Communication ---
+
+def search_anilist(search_title: str) -> List[Dict[str, any]]:
+    """
+    Searches for an anime on AniList and returns a list of potential matches.
+    """
+    query = '''
+    query ($search: String) {
+      Page(page: 1, perPage: 5) {
+        media(search: $search, type: ANIME, sort: POPULARITY_DESC) {
+          id
+          title {
+            romaji
+            english
+          }
+          popularity
+        }
+      }
+    }
+    '''
+    variables = {'search': search_title}
+
+    try:
+        response = requests.post(ANILIST_API_URL, json={'query': query, 'variables': variables})
+        response.raise_for_status()
+        data = response.json()
+
+        matches = data.get('data', {}).get('Page', {}).get('media', [])
+        if not matches:
+            return []
+
+        # Format the results into a cleaner list
+        return [
+            {
+                'romaji': m['title']['romaji'],
+                'english': m['title']['english'],
+                'popularity': m['popularity']
+            }
+            for m in matches
+        ]
+    except requests.RequestException as e:
+        print(f"\nError communicating with AniList API: {e}")
+        return []
+
+def get_anilist_info_with_cache(search_title: str, cache: Dict[str, any]) -> List[Dict[str, any]]:
+    """
+    Retrieves AniList info for a title, using a cache to avoid redundant API calls.
+    """
+    if search_title in cache:
+        # print(f"Cache hit for '{search_title}'") # Optional: for debugging
+        return cache[search_title]
+
+    # print(f"Cache miss for '{search_title}', searching online...") # Optional: for debugging
+    results = search_anilist(search_title)
+    cache[search_title] = results # Cache the result, even if it's an empty list
+    return results
 
 # --- Core Logic: Smart Matching ---
 
@@ -97,21 +181,86 @@ def process_show_group_local(show_title: str, files: List[Dict[str, any]]) -> Tu
 
     return renamed_files, unmatched_videos
 
-def process_all_files_local(file_paths: List[str]) -> Tuple[List[Tuple[str, str]], List[str]]:
+def prompt_for_selection(parsed_title: str, results: List[Dict[str, any]]) -> Optional[Dict[str, any]]:
+    """Displays a prompt for the user to select the correct anime from a list."""
+    print(f"\nMultiple matches found for '{parsed_title}'. Please choose one:")
+    for i, result in enumerate(results):
+        romaji = result.get('romaji', 'N/A')
+        english = result.get('english', 'N/A')
+        print(f"  [{i+1}] {romaji} / {english} (Popularity: {result['popularity']})")
+    print("  [0] Skip this show")
+
+    try:
+        choice = input("Enter your choice (number): ")
+        choice_num = int(choice)
+        if choice_num == 0:
+            return None
+        if 1 <= choice_num <= len(results):
+            return results[choice_num - 1]
+    except (ValueError, IndexError):
+        # Invalid input
+        pass
+
+    print("Invalid choice. Skipping this show.")
+    return None
+
+def process_all_files_local(file_paths: List[str], anilist_cache: Dict[str, any]) -> Tuple[List[Tuple[str, str]], List[str]]:
     parsed_files = [p for p in (parse_filename(path) for path in file_paths) if p]
-    grouped_by_show = defaultdict(list)
-    for pf in parsed_files: grouped_by_show[pf['title']].append(pf)
+    initial_groups = defaultdict(list)
+    for pf in parsed_files: initial_groups[pf['title']].append(pf)
+
+    official_groups = defaultdict(list)
+    unresolved_files = []
+
+    print("\n--- Resolving Show Titles with AniList ---")
+    is_interactive = sys.stdin.isatty() and sys.stdout.isatty()
+
+    for parsed_title, files in initial_groups.items():
+        print(f"Searching for '{parsed_title}'...")
+        api_results = get_anilist_info_with_cache(parsed_title, anilist_cache)
+        official_info = None
+
+        if not api_results:
+            print(f"  -> No match found. Skipping.")
+            unresolved_files.extend(files)
+            continue
+
+        if len(api_results) > 1 and is_interactive:
+            official_info = prompt_for_selection(parsed_title, api_results)
+        else:
+            # Default to the most popular result in non-interactive mode or for single matches
+            official_info = api_results[0]
+
+        if not official_info:
+            print(f"  -> Skipped by user or ambiguity.")
+            unresolved_files.extend(files)
+            continue
+
+        official_title = official_info.get('romaji') or official_info.get('english')
+        if not official_title:
+             print(f"  -> Match found, but it has no valid title. Skipping.")
+             unresolved_files.extend(files)
+             continue
+
+        print(f"  -> Matched to '{official_title}'.")
+        for f in files: f['title'] = official_title
+        official_groups[official_title].extend(files)
+
     total_renamed, total_unmatched = [], []
-    for show_title, show_files in grouped_by_show.items():
+    for show_title, show_files in official_groups.items():
         renamed, unmatched = process_show_group_local(show_title, show_files)
         total_renamed.extend(renamed)
         total_unmatched.extend(unmatched)
+
+    # Unmatched should also include files we couldn't resolve
+    total_unmatched.extend([f['original_filename'] for f in unresolved_files if f['is_video']])
+
     return total_renamed, total_unmatched
 
-def process_local_directory(directory: str):
+def process_local_directory(directory: str, anilist_cache: Dict[str, any]):
     print(f"--- Scanning Local Directory: {directory} ---")
     all_paths = [os.path.join(r, f) for r, _, fs in os.walk(directory) for f in fs]
-    renamed, unmatched = process_all_files_local(all_paths)
+    renamed, unmatched = process_all_files_local(all_paths, anilist_cache)
     _print_report(renamed, unmatched)
 
 def rename_rclone_file(remote: str, old_path: str, new_path: str):
@@ -157,7 +306,32 @@ def process_show_group_rclone(remote: str, show_title: str, files: List[Dict[str
 
     return renamed_files, unmatched_videos
 
-def process_rclone_remote(remote: str, processed_dirs: Set[str]):
+def resolve_show_title_rclone(parsed_title: str, anilist_cache: Dict[str, any]) -> Optional[str]:
+    """Resolves a parsed title to an official AniList title for non-interactive mode."""
+    print(f"Searching for '{parsed_title}'...")
+    api_results = get_anilist_info_with_cache(parsed_title, anilist_cache)
+
+    if not api_results:
+        print(f"  -> No match found. Skipping.")
+        return None
+
+    # Safety check: if the top two results have very similar popularity, it's ambiguous.
+    # We define "similar" as the second being > 90% as popular as the first.
+    if len(api_results) > 1 and api_results[1]['popularity'] > (api_results[0]['popularity'] * 0.90):
+        print(f"  -> Ambiguous results. Top two are '{api_results[0]['romaji']}' and '{api_results[1]['romaji']}'. Skipping.")
+        return None
+
+    official_info = api_results[0]
+    official_title = official_info.get('romaji') or official_info.get('english')
+
+    if not official_title:
+        print(f"  -> Match found, but it has no valid title. Skipping.")
+        return None
+
+    print(f"  -> Matched to '{official_title}'.")
+    return official_title
+
+def process_rclone_remote(remote: str, processed_dirs: Set[str], anilist_cache: Dict[str, any]):
     print(f"\n--- Processing Rclone Remote: {remote} ---")
     try:
         command = ['rclone', 'lsf', '-R', '--files-only', f'{remote}:']
@@ -167,30 +341,38 @@ def process_rclone_remote(remote: str, processed_dirs: Set[str]):
             print(f"Remote '{remote}' appears to be empty."); return
 
         files_by_dir = defaultdict(list)
-        for file_path in all_files:
-            dir_name = os.path.dirname(file_path)
-            files_by_dir[dir_name].append(file_path)
+        for f in all_files: files_by_dir[os.path.dirname(f)].append(f)
 
         for directory, files_in_dir in files_by_dir.items():
             remote_dir_id = f"{remote}:{directory}"
-            if remote_dir_id in processed_dirs:
-                print(f"Skipping already processed directory: {directory}")
-                continue
+            if remote_dir_id in processed_dirs: continue
 
             print(f"\nScanning directory: {directory}")
             parsed_files = [p for p in (parse_filename(f) for f in files_in_dir) if p]
             if not any(f['is_video'] for f in parsed_files):
-                print("  No video files found to process."); log_processed_dir(remote_dir_id); continue
+                print("  No video files found."); log_processed_dir(remote_dir_id); continue
 
-            grouped_by_show = defaultdict(list)
-            for pf in parsed_files: grouped_by_show[pf['title']].append(pf)
+            initial_groups = defaultdict(list)
+            for pf in parsed_files: initial_groups[pf['title']].append(pf)
+
+            official_groups = defaultdict(list)
+            unresolved_files = []
+
+            for parsed_title, files in initial_groups.items():
+                official_title = resolve_show_title_rclone(parsed_title, anilist_cache)
+                if official_title:
+                    for f in files: f['title'] = official_title
+                    official_groups[official_title].extend(files)
+                else:
+                    unresolved_files.extend(files)
 
             dir_renamed, dir_unmatched = [], []
-            for show_title, show_files in grouped_by_show.items():
+            for show_title, show_files in official_groups.items():
                 renamed, unmatched = process_show_group_rclone(remote, show_title, show_files)
                 dir_renamed.extend(renamed)
                 dir_unmatched.extend(unmatched)
 
+            dir_unmatched.extend([f['original_filename'] for f in unresolved_files if f['is_video']])
             _print_report(dir_renamed, dir_unmatched)
             log_processed_dir(remote_dir_id)
 
@@ -213,15 +395,15 @@ def _print_report(renamed_files: list, unmatched_videos: list):
 
 # --- Main Execution Block ---
 
-def handle_windows():
+def handle_windows(anilist_cache: Dict[str, any]):
     if len(sys.argv) > 1 and os.path.isdir(sys.argv[1]):
-        process_local_directory(sys.argv[1])
+        process_local_directory(sys.argv[1], anilist_cache)
     else:
         user_path = input("Please enter the path to the folder to process: ")
-        if os.path.isdir(user_path): process_local_directory(user_path)
+        if os.path.isdir(user_path): process_local_directory(user_path, anilist_cache)
         else: print(f"Error: '{user_path}' is not a valid directory.")
 
-def handle_linux():
+def handle_linux(anilist_cache: Dict[str, any]):
     conf_file = 'rclone.conf'
     if os.path.exists(conf_file):
         print("rclone.conf found. Processing remotes...")
@@ -229,24 +411,31 @@ def handle_linux():
         remotes = get_rclone_remotes(conf_file)
         if not remotes: print("No remotes found in rclone.conf."); return
         for remote in remotes:
-            process_rclone_remote(remote, processed_dirs)
+            process_rclone_remote(remote, processed_dirs, anilist_cache)
     elif len(sys.argv) > 1 and os.path.isdir(sys.argv[1]):
-        process_local_directory(sys.argv[1])
+        process_local_directory(sys.argv[1], anilist_cache)
     else:
         print("rclone.conf not found. Defaulting to interactive local mode.")
         user_path = input("Please enter the path to the folder to process: ")
-        if os.path.isdir(user_path): process_local_directory(user_path)
+        if os.path.isdir(user_path): process_local_directory(user_path, anilist_cache)
         else: print(f"Error: '{user_path}' is not a valid directory.")
 
 def main():
+    anilist_cache = load_cache()
+
     system = platform.system()
-    if system == 'Windows': handle_windows()
-    elif system == 'Linux': handle_linux()
-    else:
-        print(f"Unsupported OS: {system}. Defaulting to local processing.")
-        user_path = input("Please enter the path to the folder to process: ")
-        if os.path.isdir(user_path): process_local_directory(user_path)
-        else: print(f"Error: '{user_path}' is not a valid directory.")
+    try:
+        if system == 'Windows': handle_windows(anilist_cache)
+        elif system == 'Linux': handle_linux(anilist_cache)
+        else:
+            print(f"Unsupported OS: {system}. Defaulting to local processing.")
+            user_path = input("Please enter the path to the folder to process: ")
+            if os.path.isdir(user_path): process_local_directory(user_path, anilist_cache)
+            else: print(f"Error: '{user_path}' is not a valid directory.")
+    finally:
+        # Ensure the cache is saved even if the script encounters an error
+        save_cache(anilist_cache)
+        print("\nAniList cache saved.")
 
 if __name__ == '__main__':
     main()
