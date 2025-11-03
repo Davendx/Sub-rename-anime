@@ -3,6 +3,8 @@ import sys
 import subprocess
 import platform
 import re
+import logging
+from datetime import datetime
 from typing import List, Dict, Optional, Set, Tuple
 from collections import defaultdict
 
@@ -17,9 +19,20 @@ VIDEO_EXTENSIONS = ['.mkv', '.mp4', '.avi', '.mov']
 import json
 
 SUBTITLE_EXTENSIONS = ['.srt', '.ass', '.sub']
+PROCESSED_DIRS_LOG_FILE = 'processed_dirs.log'
 LOG_FILE = 'rename_script_log.txt'
 ANILIST_API_URL = 'https://graphql.anilist.co'
 ANILIST_CACHE_FILE = 'anilist_cache.json'
+
+# --- Logging ---
+
+def setup_logging():
+    log_filename = f"renamer_log_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.txt"
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', filename=log_filename, filemode='w')
+    console = logging.StreamHandler()
+    console.setLevel(logging.INFO)
+    console.setFormatter(logging.Formatter('%(message)s'))
+    logging.getLogger('').addHandler(console)
 
 # --- Caching ---
 
@@ -40,7 +53,7 @@ def save_cache(cache: Dict[str, any]):
         with open(ANILIST_CACHE_FILE, 'w') as f:
             json.dump(cache, f, indent=2)
     except IOError as e:
-        print(f"\nWarning: Could not save AniList cache file: {e}")
+        logging.warning(f"\nWarning: Could not save AniList cache file: {e}")
 
 
 # --- AniList API Communication ---
@@ -84,7 +97,7 @@ def search_anilist(search_title: str) -> List[Dict[str, any]]:
             for m in matches
         ]
     except requests.RequestException as e:
-        print(f"\nError communicating with AniList API: {e}")
+        logging.error(f"\nError communicating with AniList API: {e}")
         return []
 
 def get_anilist_info_with_cache(search_title: str, cache: Dict[str, any]) -> List[Dict[str, any]]:
@@ -133,11 +146,11 @@ def find_smart_match(video: Dict[str, any], subtitles: List[Dict[str, any]], off
 # --- Rclone & Logging Helpers (Framework) ---
 
 def load_processed_dirs() -> Set[str]:
-    if not os.path.exists(LOG_FILE): return set()
-    with open(LOG_FILE, 'r') as f: return set(line.strip() for line in f)
+    if not os.path.exists(PROCESSED_DIRS_LOG_FILE): return set()
+    with open(PROCESSED_DIRS_LOG_FILE, 'r') as f: return set(line.strip() for line in f)
 
 def log_processed_dir(remote_dir: str):
-    with open(LOG_FILE, 'a') as f: f.write(f"{remote_dir}\n")
+    with open(PROCESSED_DIRS_LOG_FILE, 'a') as f: f.write(f"{remote_dir}\n")
 
 def get_rclone_remotes(conf_path: str) -> List[str]:
     remotes = []
@@ -168,28 +181,47 @@ def process_show_group_local(show_title: str, files: List[Dict[str, any]]) -> Tu
             video_renamed, sub_renamed = False, False
             if old_video_path != new_video_path:
                 try: os.rename(old_video_path, new_video_path); video_renamed = True
-                except OSError as e: print(f"  Error renaming video '{os.path.basename(old_video_path)}': {e}")
+                except OSError as e: logging.error(f"  Error renaming video '{os.path.basename(old_video_path)}': {e}")
             if old_sub_path != new_sub_path:
                 try: os.rename(old_sub_path, new_sub_path); sub_renamed = True
-                except OSError as e: print(f"  Error renaming subtitle '{os.path.basename(old_sub_path)}': {e}")
+                except OSError as e: logging.error(f"  Error renaming subtitle '{os.path.basename(old_sub_path)}': {e}")
 
             if video_renamed: renamed_files.append((os.path.basename(old_video_path), os.path.basename(new_video_path)))
             if sub_renamed: renamed_files.append((os.path.basename(old_sub_path), os.path.basename(new_sub_path)))
 
             subtitles.remove(match)
         else:
-            unmatched_videos.append(video['original_filename'])
+            unmatched_videos.append(video)
 
-    return renamed_files, unmatched_videos
+    if len(unmatched_videos) > 0 and len(unmatched_videos) == len(subtitles):
+        logging.info(f"Attempting relative match for {len(unmatched_videos)} video(s) of '{show_title}'.")
+        sorted_videos = sorted(unmatched_videos, key=lambda x: x['episode'])
+        sorted_subtitles = sorted(subtitles, key=lambda x: (x['season'], x['episode']))
+        newly_matched_videos = []
+        for video, sub_match in zip(sorted_videos, sorted_subtitles):
+            newly_matched_videos.append(video)
+            new_base_name = f"{show_title} - S{sub_match['season']:02d}E{sub_match['episode']:02d}"
+            old_video_path, old_sub_path = video['original_filename'], sub_match['original_filename']
+            new_video_path = os.path.join(os.path.dirname(old_video_path), f"{new_base_name}{video['extension']}")
+            new_sub_path = os.path.join(os.path.dirname(old_sub_path), f"{new_base_name}{sub_match['extension']}")
+            if old_video_path != new_video_path:
+                try: os.rename(old_video_path, new_video_path); renamed_files.append((os.path.basename(old_video_path), os.path.basename(new_video_path)))
+                except OSError as e: logging.error(f"  Error renaming video '{os.path.basename(old_video_path)}': {e}")
+            if old_sub_path != new_sub_path:
+                try: os.rename(old_sub_path, new_sub_path); renamed_files.append((os.path.basename(old_sub_path), os.path.basename(new_sub_path)))
+                except OSError as e: logging.error(f"  Error renaming subtitle '{os.path.basename(old_sub_path)}': {e}")
+        unmatched_videos = [v for v in unmatched_videos if v not in newly_matched_videos]
+
+    return renamed_files, [v['original_filename'] for v in unmatched_videos]
 
 def prompt_for_selection(parsed_title: str, results: List[Dict[str, any]]) -> Optional[Dict[str, any]]:
     """Displays a prompt for the user to select the correct anime from a list."""
-    print(f"\nMultiple matches found for '{parsed_title}'. Please choose one:")
+    logging.info(f"\nMultiple matches found for '{parsed_title}'. Please choose one:")
     for i, result in enumerate(results):
         romaji = result.get('romaji', 'N/A')
         english = result.get('english', 'N/A')
-        print(f"  [{i+1}] {romaji} / {english} (Popularity: {result['popularity']})")
-    print("  [0] Skip this show")
+        logging.info(f"  [{i+1}] {romaji} / {english} (Popularity: {result['popularity']})")
+    logging.info("  [0] Skip this show")
 
     try:
         choice = input("Enter your choice (number): ")
@@ -202,7 +234,7 @@ def prompt_for_selection(parsed_title: str, results: List[Dict[str, any]]) -> Op
         # Invalid input
         pass
 
-    print("Invalid choice. Skipping this show.")
+    logging.warning("Invalid choice. Skipping this show.")
     return None
 
 def normalize_title(title: str) -> str:
@@ -213,13 +245,13 @@ def process_all_files_local(file_paths: List[str], anilist_cache: Dict[str, any]
 
     # Resolve titles for all files first
     for pf in parsed_files:
-        print(f"Searching for '{pf['title']}'...")
+        logging.info(f"Searching for '{pf['title']}'...")
         api_results = get_anilist_info_with_cache(pf['title'], anilist_cache)
         official_info = None
 
         is_interactive = sys.stdin.isatty() and sys.stdout.isatty()
         if not api_results:
-            print(f"  -> No match found. Using original title.")
+            logging.warning(f"  -> No match found. Using original title.")
             continue
 
         if len(api_results) > 1 and is_interactive:
@@ -228,15 +260,15 @@ def process_all_files_local(file_paths: List[str], anilist_cache: Dict[str, any]
             official_info = api_results[0]
 
         if not official_info:
-            print(f"  -> Skipped by user or ambiguity. Using original title.")
+            logging.warning(f"  -> Skipped by user or ambiguity. Using original title.")
             continue
 
         official_title = official_info.get('romaji') or official_info.get('english')
         if not official_title:
-            print(f"  -> Match found, but has no valid title. Using original title.")
+            logging.warning(f"  -> Match found, but has no valid title. Using original title.")
             continue
 
-        print(f"  -> Matched '{pf['title']}' to '{official_title}'.")
+        logging.info(f"  -> Matched '{pf['title']}' to '{official_title}'.")
         pf['title'] = official_title
 
     # Now group by a normalized version of the (potentially updated) title
@@ -255,7 +287,7 @@ def process_all_files_local(file_paths: List[str], anilist_cache: Dict[str, any]
     return total_renamed, total_unmatched
 
 def process_local_directory(directory: str, anilist_cache: Dict[str, any]):
-    print(f"--- Scanning Local Directory: {directory} ---")
+    logging.info(f"--- Scanning Local Directory: {directory} ---")
     all_paths = [os.path.join(r, f) for r, _, fs in os.walk(directory) for f in fs]
     renamed, unmatched = process_all_files_local(all_paths, anilist_cache)
     _print_report(renamed, unmatched)
@@ -268,7 +300,7 @@ def rename_rclone_file(remote: str, old_path: str, new_path: str):
         result = subprocess.run(command, capture_output=True, text=True, check=True)
     except subprocess.CalledProcessError as e:
         # rclone might fail if the file is locked, etc.
-        print(f"  Error renaming '{os.path.basename(old_path)}': {e.stderr.strip()}")
+        logging.error(f"  Error renaming '{os.path.basename(old_path)}': {e.stderr.strip()}")
 
 def process_show_group_rclone(remote: str, show_title: str, files: List[Dict[str, any]]) -> Tuple[List[Tuple[str, str]], List[str]]:
     videos = sorted([f for f in files if f['is_video']], key=lambda x: (x['season'], x['episode']))
@@ -305,37 +337,37 @@ def process_show_group_rclone(remote: str, show_title: str, files: List[Dict[str
 
 def resolve_show_title_rclone(parsed_title: str, anilist_cache: Dict[str, any]) -> Optional[str]:
     """Resolves a parsed title to an official AniList title for non-interactive mode."""
-    print(f"Searching for '{parsed_title}'...")
+    logging.info(f"Searching for '{parsed_title}'...")
     api_results = get_anilist_info_with_cache(parsed_title, anilist_cache)
 
     if not api_results:
-        print(f"  -> No match found. Skipping.")
+        logging.warning(f"  -> No match found. Skipping.")
         return None
 
     # Safety check: if the top two results have very similar popularity, it's ambiguous.
     # We define "similar" as the second being > 90% as popular as the first.
     if len(api_results) > 1 and api_results[1]['popularity'] > (api_results[0]['popularity'] * 0.90):
-        print(f"  -> Ambiguous results. Top two are '{api_results[0]['romaji']}' and '{api_results[1]['romaji']}'. Skipping.")
+        logging.warning(f"  -> Ambiguous results. Top two are '{api_results[0]['romaji']}' and '{api_results[1]['romaji']}'. Skipping.")
         return None
 
     official_info = api_results[0]
     official_title = official_info.get('romaji') or official_info.get('english')
 
     if not official_title:
-        print(f"  -> Match found, but it has no valid title. Skipping.")
+        logging.warning(f"  -> Match found, but it has no valid title. Skipping.")
         return None
 
-    print(f"  -> Matched to '{official_title}'.")
+    logging.info(f"  -> Matched to '{official_title}'.")
     return official_title
 
 def process_rclone_remote(remote: str, processed_dirs: Set[str], anilist_cache: Dict[str, any]):
-    print(f"\n--- Processing Rclone Remote: {remote} ---")
+    logging.info(f"\n--- Processing Rclone Remote: {remote} ---")
     try:
         command = ['rclone', 'lsf', '-R', '--files-only', f'{remote}:']
         result = subprocess.run(command, capture_output=True, text=True, check=True)
         all_files = result.stdout.strip().split('\n')
         if not all_files or (len(all_files) == 1 and not all_files[0]):
-            print(f"Remote '{remote}' appears to be empty."); return
+            logging.info(f"Remote '{remote}' appears to be empty."); return
 
         files_by_dir = defaultdict(list)
         for f in all_files: files_by_dir[os.path.dirname(f)].append(f)
@@ -344,10 +376,10 @@ def process_rclone_remote(remote: str, processed_dirs: Set[str], anilist_cache: 
             remote_dir_id = f"{remote}:{directory}"
             if remote_dir_id in processed_dirs: continue
 
-            print(f"\nScanning directory: {directory}")
+            logging.info(f"\nScanning directory: {directory}")
             parsed_files = [p for p in (parse_filename(f) for f in files_in_dir) if p]
             if not any(f['is_video'] for f in parsed_files):
-                print("  No video files found."); log_processed_dir(remote_dir_id); continue
+                logging.info("  No video files found."); log_processed_dir(remote_dir_id); continue
 
             initial_groups = defaultdict(list)
             for pf in parsed_files: initial_groups[pf['title']].append(pf)
@@ -374,48 +406,50 @@ def process_rclone_remote(remote: str, processed_dirs: Set[str], anilist_cache: 
             log_processed_dir(remote_dir_id)
 
     except (subprocess.CalledProcessError, FileNotFoundError) as e:
-        print(f"Fatal error processing remote '{remote}': Check rclone is installed and configured. Error: {e}")
+        logging.critical(f"Fatal error processing remote '{remote}': Check rclone is installed and configured. Error: {e}")
 
 # --- UI and Reporting ---
 
 def _print_report(renamed_files: list, unmatched_videos: list):
-    print("\n--- Overall Operation Summary ---")
+    logging.info("\n--- Overall Operation Summary ---")
     if renamed_files:
-        print("\nSuccessfully renamed:")
-        for old, new in renamed_files: print(f"  '{old}' -> '{new}'")
-    else: print("\nNo files were renamed.")
+        logging.info("\nSuccessfully renamed:")
+        for old, new in renamed_files: logging.info(f"  '{old}' -> '{new}'")
+    else: logging.info("\nNo files were renamed.")
     if unmatched_videos:
-        print("\nVideos with no matching subtitle:")
-        for video in unmatched_videos: print(f"  - {os.path.basename(video)}")
+        logging.info("\nVideos with no matching subtitle:")
+        for video in unmatched_videos: logging.info(f"  - {os.path.basename(video)}")
     if not renamed_files and not unmatched_videos:
-        print("Nothing to do. All files may be already organized or no media was found.")
+        logging.info("Nothing to do. All files may be already organized or no media was found.")
 
 # --- Main Execution Block ---
 
 def handle_windows(anilist_cache: Dict[str, any]):
+    setup_logging()
     if len(sys.argv) > 1 and os.path.isdir(sys.argv[1]):
         process_local_directory(sys.argv[1], anilist_cache)
     else:
         user_path = input("Please enter the path to the folder to process: ")
         if os.path.isdir(user_path): process_local_directory(user_path, anilist_cache)
-        else: print(f"Error: '{user_path}' is not a valid directory.")
+        else: logging.error(f"Error: '{user_path}' is not a valid directory.")
 
 def handle_linux(anilist_cache: Dict[str, any]):
+    setup_logging()
     conf_file = 'rclone.conf'
     if os.path.exists(conf_file):
-        print("rclone.conf found. Processing remotes...")
+        logging.info("rclone.conf found. Processing remotes...")
         processed_dirs = load_processed_dirs()
         remotes = get_rclone_remotes(conf_file)
-        if not remotes: print("No remotes found in rclone.conf."); return
+        if not remotes: logging.warning("No remotes found in rclone.conf."); return
         for remote in remotes:
             process_rclone_remote(remote, processed_dirs, anilist_cache)
     elif len(sys.argv) > 1 and os.path.isdir(sys.argv[1]):
         process_local_directory(sys.argv[1], anilist_cache)
     else:
-        print("rclone.conf not found. Defaulting to interactive local mode.")
+        logging.info("rclone.conf not found. Defaulting to interactive local mode.")
         user_path = input("Please enter the path to the folder to process: ")
         if os.path.isdir(user_path): process_local_directory(user_path, anilist_cache)
-        else: print(f"Error: '{user_path}' is not a valid directory.")
+        else: logging.error(f"Error: '{user_path}' is not a valid directory.")
 
 def main():
     anilist_cache = load_cache()
@@ -425,14 +459,16 @@ def main():
         if system == 'Windows': handle_windows(anilist_cache)
         elif system == 'Linux': handle_linux(anilist_cache)
         else:
-            print(f"Unsupported OS: {system}. Defaulting to local processing.")
+            logging.warning(f"Unsupported OS: {system}. Defaulting to local processing.")
             user_path = input("Please enter the path to the folder to process: ")
             if os.path.isdir(user_path): process_local_directory(user_path, anilist_cache)
-            else: print(f"Error: '{user_path}' is not a valid directory.")
+            else: logging.error(f"Error: '{user_path}' is not a valid directory.")
     finally:
         # Ensure the cache is saved even if the script encounters an error
         save_cache(anilist_cache)
-        print("\nAniList cache saved.")
+        logging.info("\nAniList cache saved.")
+        if system == 'Windows' and sys.stdin.isatty() and len(sys.argv) == 1:
+            input("\nProcessing complete. Press Enter to exit.")
 
 if __name__ == '__main__':
     main()
