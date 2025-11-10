@@ -2,3 +2,5 @@ anitopy
 requests
 python-Levenshtein
 fuzzywuzzy
+PyYAML
+tqdm

@@ -38,6 +38,45 @@ def test_get_unique_filepath(mock_exists):
     unique_filepath = anime_renamer.get_unique_filepath(filepath)
     assert unique_filepath == 'test_v3.txt'
 
+@patch('xml.etree.ElementTree.ElementTree')
+def test_create_nfo_file(mock_ElementTree):
+    """
+    Test the create_nfo_file function.
+    """
+    mock_tree_instance = mock_ElementTree.return_value
+
+    anime_data = {
+        'title': {'romaji': 'My Anime', 'english': 'My Anime'},
+        'description': 'An anime about testing.'
+    }
+    # Test for video file NFO
+    anime_renamer.create_nfo_file('test.nfo', anime_data, 1, 1, True)
+
+    mock_ElementTree.assert_called_once()
+    args, _ = mock_ElementTree.call_args
+    root = args[0]
+
+    assert root.tag == 'episodedetails'
+    assert root.find('title').text == 'Episode 01'
+    assert root.find('season').text == '1'
+    assert root.find('episode').text == '1'
+    assert root.find('showtitle').text == 'My Anime'
+    assert root.find('plot').text == 'An anime about testing.'
+    assert root.find('fileinfo') is None
+    mock_tree_instance.write.assert_called_with('test.nfo', encoding='utf-8', xml_declaration=True)
+
+    # Test for subtitle-only NFO
+    mock_ElementTree.reset_mock()
+    anime_renamer.create_nfo_file('sub_only.nfo', anime_data, 1, 2, False)
+
+    mock_ElementTree.assert_called_once()
+    args, _ = mock_ElementTree.call_args
+    root = args[0]
+
+    assert root.find('fileinfo') is not None
+    assert root.find('fileinfo/streamdetails/video/codec').text == 'unknown'
+    mock_tree_instance.write.assert_called_with('sub_only.nfo', encoding='utf-8', xml_declaration=True)
+
 def test_calculate_season_episode():
     """
     Test the calculate_season_episode function.
@@ -51,3 +90,37 @@ def test_calculate_season_episode():
     assert anime_renamer.calculate_season_episode(13, season_data) == (2, 1)
     assert anime_renamer.calculate_season_episode(24, season_data) == (2, 12)
     assert anime_renamer.calculate_season_episode(25, season_data) == (None, None) # Fallback
+
+@patch('anime_renamer.rclone_handler')
+def test_find_files_rclone(mock_rclone_handler):
+    """
+    Test the find_files function with an rclone remote.
+    """
+    mock_rclone_handler.rclone_lsjson.return_value = [
+        {'Path': 'My Anime/S01/My Anime - 01.mkv', 'IsDir': False},
+        {'Path': 'My Anime/S01/My Anime - 01.ass', 'IsDir': False},
+        {'Path': 'My Anime/S01/another_file.txt', 'IsDir': False},
+    ]
+
+    file_groups = anime_renamer.find_files('gdrive:/Anime', recursive=True, rclone_remote='gdrive:/Anime', rclone_config='rclone.conf')
+
+    expected_groups = {
+        'My Anime/S01': {
+            'videos': ['My Anime/S01/My Anime - 01.mkv'],
+            'subtitles': ['My Anime/S01/My Anime - 01.ass']
+        }
+    }
+
+    assert file_groups == expected_groups
+    mock_rclone_handler.rclone_lsjson.assert_called_once_with('gdrive:/Anime', 'rclone.conf')
+
+@patch('builtins.input', side_effect=['1', '/path/to/anime'])
+@patch('anime_renamer.find_files')
+@patch('os.path.isdir', return_value=True)
+def test_interactive_menu_local(mock_isdir, mock_find_files, mock_input):
+    """
+    Test the interactive_menu function for local path processing.
+    """
+    with patch('sys.argv', ['anime_renamer.py']):
+        anime_renamer.main()
+    mock_find_files.assert_called_with('/path/to/anime', False)
