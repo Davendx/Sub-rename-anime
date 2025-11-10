@@ -39,6 +39,21 @@ def rclone_lsjson(remote_path, rclone_config=None):
         logging.error(f"Failed to list files on rclone remote '{remote_path}': {e}")
         return None
 
+def rclone_lsf(remote_path, rclone_config=None):
+    """
+    List files on an rclone remote using lsf.
+    """
+    cmd = ['rclone', 'lsf', remote_path]
+    if rclone_config:
+        cmd.extend(['--config', rclone_config])
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        return result.stdout.splitlines()
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Failed to list files on rclone remote '{remote_path}': {e}")
+        return []
+
 def rclone_moveto(source_path, dest_path, rclone_config=None):
     """
     Move a file on an rclone remote using moveto.

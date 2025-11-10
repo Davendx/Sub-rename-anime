@@ -8,11 +8,11 @@ An intelligent Python script to rename anime video and subtitle files using meta
 - **Accurate Metadata:** Fetches canonical titles and seasonal information from the AniList GraphQL API.
 - **Fuzzy Matching:** Automatically matches local files to the correct AniList entry, even with different titles or synonyms.
 - **Season Inference:** Correctly handles continuous episode numbering across multiple seasons (e.g., episode 13 of a 12-episode season is correctly identified as S02E01).
-- **Interactive Disambiguation:** Prompts the user to choose the correct anime when there are multiple possibilities.
-- **Command-Line Interface:** Provides a flexible command-line interface with the following options:
-    - `--dry-run`: Preview the renaming changes without applying them.
-    - `--recursive`: Process subdirectories recursively.
-    - `--verbose`: Enable detailed logging.
+- **Rclone Support:** Process files directly on any cloud storage provider supported by `rclone`.
+- **NFO File Generation:** Create Kodi-compatible `.nfo` metadata files for each episode.
+- **Interactive Menu:** A user-friendly menu to guide you through the renaming process when no path is provided.
+- **Configurable:** Customize the script's behavior using a `config.yaml` file.
+- **Command-Line Interface:** Provides a flexible command-line interface with a wide range of options.
 - **Windows Context Menu Integration:** Can be added to the Windows right-click context menu for easy access.
 
 ## Installation
@@ -28,19 +28,61 @@ An intelligent Python script to rename anime video and subtitle files using meta
     pip install -r requirements.txt
     ```
 
-## Usage
+3.  **(Optional) Install `rclone`:** If you want to process files on a remote storage provider, you'll need to install and configure `rclone`. You can find instructions on the [official `rclone` website](https://rclone.org/install/).
 
-You can run the script from the command line by providing the path to the directory you want to process:
+## Configuration
 
-```bash
-python3 anime_renamer.py "path/to/your/anime/folder"
+The script uses a `config.yaml` file to allow for easy customization. If this file doesn't exist, it will be created with default settings the first time you run the script.
+
+Here's an example of the `config.yaml` file:
+
+```yaml
+# The title language to use for renamed files (romaji, english, or native)
+title_language: romaji
+
+# The template for renamed files
+rename_template: "{title} - S{season:02d}E{episode:02d} - Episode {episode:02d}"
+
+# The confidence threshold for fuzzy string matching (0-100)
+fuzzy_threshold: 85
 ```
 
-You can also use the available flags to modify the script's behavior:
+## Usage
 
--   `--dry-run`: Preview the renames without making any changes.
--   `--recursive`: Scan all subdirectories within the specified folder.
--   `--verbose`: See detailed logs of the script's operations.
+### Interactive Menu
+
+If you run the script without any arguments, you'll be greeted with an interactive menu that allows you to choose how you want to process your files:
+
+```bash
+python3 anime_renamer.py
+```
+
+### Command-Line Interface
+
+You can also run the script from the command line by providing the path to the directory you want to process:
+
+```bash
+# Process a local directory
+python3 anime_renamer.py "path/to/your/anime/folder"
+
+# Process an rclone remote
+python3 anime_renamer.py --rclone-remote "gdrive:/Anime"
+```
+
+The script supports a variety of flags to customize its behavior:
+
+| Flag | Description |
+| --- | --- |
+| `--dry-run` | Preview the renames without making any changes. |
+| `--recursive` | Scan all subdirectories within the specified folder. |
+| `--verbose` | See detailed logs of the script's operations. |
+| `--force-refresh` | Force a refresh of the AniList API cache. |
+| `--interactive` | Pause for user confirmation on all major decisions. |
+| `--batch` | Process a list of directories from a text file. |
+| `--bundle-ova` | Move specials and OVAs to a `S00_OVAs` subfolder. |
+| `--export-nfo` | Export `.nfo` files with metadata for each episode. |
+| `--rclone-remote` | The rclone remote to process (e.g., `'gdrive:/Anime'`). |
+| `--rclone-config` | Path to the `rclone.conf` file. |
 
 ## Windows Right-Click Context Menu Integration
 

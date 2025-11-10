@@ -144,6 +144,26 @@ def get_unique_filepath(filepath):
             return new_filepath
         version += 1
 
+def get_unique_rclone_filepath(remote, filepath, rclone_config=None):
+    """
+    Get a unique filepath on an rclone remote by appending a version number if the file already exists.
+    """
+    dir_path = os.path.dirname(filepath)
+    remote_dir_path = f"{remote}:{dir_path}"
+
+    existing_files = rclone_handler.rclone_lsf(remote_dir_path, rclone_config)
+
+    if os.path.basename(filepath) not in existing_files:
+        return filepath
+
+    base, ext = os.path.splitext(filepath)
+    version = 2
+    while True:
+        new_filename = f"{os.path.basename(base)}_v{version}{ext}"
+        if new_filename not in existing_files:
+            return os.path.join(dir_path, new_filename)
+        version += 1
+
 def create_nfo_file(nfo_path, anime_data, season, episode, has_video):
     """
     Create an .nfo file with the anime's metadata.
@@ -213,7 +233,7 @@ def process_folder(folder_path, files, anime_data, conf, dry_run, force_refresh,
                 season, episode = 1, absolute_episode
 
         if anime_data:
-            title = anime_data['title'].get(conf['title_language']) or anime_data['title'].get('romaji') or anime_data['title'].get('english')
+            title = anime_data['title'].get(conf['title_language']) or anime_data['title'].get('romaji') or anime_data['title'].get('english') or anime_data['title'].get('native')
         else:
             title = parsed_file.get('anime_title', 'Unknown Title')
 
@@ -229,7 +249,8 @@ def process_folder(folder_path, files, anime_data, conf, dry_run, force_refresh,
 
             if rclone_remote:
                 dest_folder = os.path.join(os.path.dirname(video_file), "S00_OVAs") if bundle_ova and season == 0 else os.path.dirname(video_file)
-                new_video_path = f"{rclone_remote}:{os.path.join(dest_folder, new_video_name)}"
+                unique_video_path = get_unique_rclone_filepath(rclone_remote, os.path.join(dest_folder, new_video_name), rclone_config)
+                new_video_path = f"{rclone_remote}:{unique_video_path}"
                 original_video_path = f"{rclone_remote}:{video_file}"
             else:
                 dest_folder = os.path.join(folder_path, "S00_OVAs") if bundle_ova and season == 0 else folder_path
@@ -270,7 +291,8 @@ def process_folder(folder_path, files, anime_data, conf, dry_run, force_refresh,
 
                     if rclone_remote:
                         dest_folder = os.path.join(os.path.dirname(sub_path), "S00_OVAs") if bundle_ova and season == 0 else os.path.dirname(sub_path)
-                        new_sub_path = f"{rclone_remote}:{os.path.join(dest_folder, new_sub_name)}"
+                        unique_sub_path = get_unique_rclone_filepath(rclone_remote, os.path.join(dest_folder, new_sub_name), rclone_config)
+                        new_sub_path = f"{rclone_remote}:{unique_sub_path}"
                         original_sub_path = f"{rclone_remote}:{sub_path}"
                     else:
                         dest_folder = os.path.join(folder_path, "S00_OVAs") if bundle_ova and season == 0 else folder_path
@@ -410,21 +432,21 @@ def main():
                 print(f"No results found for '{parsed_title}'. Proceeding with parsed filename.")
             elif len(search_results) == 1:
                 selected_anime = search_results[0]
-                title = selected_anime['title'].get(conf['title_language']) or selected_anime['title'].get('romaji') or selected_anime['title'].get('english')
+                title = selected_anime['title'].get(conf['title_language']) or selected_anime['title'].get('romaji') or selected_anime['title'].get('english') or selected_anime['title'].get('native')
                 print(f"Automatically matched with the only AniList result: {title}")
             else:
-                titles = { (anime['title'].get('romaji') or anime['title'].get('english')): anime for anime in search_results }
+                titles = { (anime['title'].get('romaji') or anime['title'].get('english') or anime['title'].get('native')): anime for anime in search_results }
                 best_match = process.extractOne(parsed_title, titles.keys())
                 if best_match and best_match[1] >= conf['fuzzy_threshold']:
                     selected_anime = titles[best_match[0]]
-                    title = selected_anime['title'].get(conf['title_language']) or selected_anime['title'].get('romaji') or selected_anime['title'].get('english')
+                    title = selected_anime['title'].get(conf['title_language']) or selected_anime['title'].get('romaji') or selected_anime['title'].get('english') or selected_anime['title'].get('native')
                     print(f"Automatically matched with AniList title (score: {best_match[1]}): {title}")
                 else:
                     logging.info(f"Fuzzy match score was too low ({best_match[1] if best_match else 'N/A'}). Asking for user input.")
                     selected_anime = choose_anime(search_results)
 
             if selected_anime:
-                title = selected_anime['title'].get(conf['title_language']) or selected_anime['title'].get('romaji') or selected_anime['title'].get('english')
+                title = selected_anime['title'].get(conf['title_language']) or selected_anime['title'].get('romaji') or selected_anime['title'].get('english') or selected_anime['title'].get('native')
                 print(f"Processing with selected AniList title: {title}")
 
             if args.interactive and selected_anime:
