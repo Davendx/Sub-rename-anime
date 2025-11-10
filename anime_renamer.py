@@ -1,4 +1,4 @@
-#!/usr/-bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 """
@@ -41,8 +41,6 @@ def find_files(directory, recursive):
                 elif file.lower().endswith(SUBTITLE_EXTENSIONS):
                     file_groups[root]['subtitles'].append(item_path)
     else:
-        # In non-recursive mode, only scan the top-level directory.
-        # Group all files under this single directory.
         for item in os.listdir(directory):
             item_path = os.path.join(directory, item)
             if os.path.isfile(item_path):
@@ -103,10 +101,34 @@ def calculate_season_episode(absolute_episode, season_data):
 
         ep_offset += num_episodes
 
-    return 1, absolute_episode
+    # Fallback if episode number is beyond all known seasons
+    return None, None
 
+def get_language_tag(filename):
+    """
+    Detect a language tag from the filename.
+    """
+    match = re.search(r'\[(eng|jpn)\]', filename, re.IGNORECASE)
+    if match:
+        return f" [{match.group(1).lower()}]"
+    return ""
 
-def process_folder(folder_path, files, anime_data, dry_run, verbose):
+def get_unique_filepath(filepath):
+    """
+    Get a unique filepath by appending a version number if the file already exists.
+    """
+    if not os.path.exists(filepath):
+        return filepath
+
+    base, ext = os.path.splitext(filepath)
+    version = 2
+    while True:
+        new_filepath = f"{base}_v{version}{ext}"
+        if not os.path.exists(new_filepath):
+            return new_filepath
+        version += 1
+
+def process_folder(folder_path, files, anime_data, dry_run, force_refresh, verbose):
     """
     Process and rename all video and subtitle files in a single folder.
     """
@@ -116,7 +138,34 @@ def process_folder(folder_path, files, anime_data, dry_run, verbose):
     season_data = []
     if anime_data:
         logging.info(f"Fetching season data for {anime_data['title']['romaji']}...")
-        season_data = anilist_api.get_anime_season_data(anime_data['id'])
+        season_data = anilist_api.get_anime_season_data(anime_data['id'], force_refresh)
+
+    # Pre-process to detect mixed seasons
+    season_detections = defaultdict(list)
+    for video_path in video_files:
+        parsed_video = anitopy.parse(os.path.basename(video_path))
+        try:
+            absolute_episode = int(parsed_video.get('episode_number', '0'))
+            season, _ = calculate_season_episode(absolute_episode, season_data)
+            if season is not None:
+                season_detections[season].append(os.path.basename(video_path))
+        except (ValueError, TypeError):
+            continue
+
+    if len(season_detections) > 1:
+        print("\nDetected mixed seasons in this folder:")
+        for season, eps in season_detections.items():
+            print(f"  - Season {season}: {len(eps)} episode(s)")
+
+        try:
+            choice = input("Proceed with renaming all? (y/n): ").lower()
+            if choice != 'y':
+                print("Skipping folder.")
+                return
+        except KeyboardInterrupt:
+            print("\nOperation cancelled by user.")
+            sys.exit(0)
+
 
     for video_path in video_files:
         original_filename = os.path.basename(video_path)
@@ -128,15 +177,23 @@ def process_folder(folder_path, files, anime_data, dry_run, verbose):
             logging.warning(f"Could not parse episode number for '{original_filename}'. Skipping.")
             continue
 
-        parsed_season = parsed_video.get('anime_season')
-        if parsed_season:
-            season = int(parsed_season)
+        anime_type = parsed_video.get('anime_type')
+        if anime_type and (anime_type.lower() == 'ova' or anime_type.lower() == 'special'):
+            season = 0
             episode = absolute_episode
-        elif season_data:
-            season, episode = calculate_season_episode(absolute_episode, season_data)
-            logging.info(f"Inferred S{season:02d}E{episode:02d} from absolute episode {absolute_episode}.")
         else:
-            season, episode = 1, absolute_episode
+            parsed_season = parsed_video.get('anime_season')
+            if parsed_season:
+                season = int(parsed_season)
+                episode = absolute_episode
+            elif season_data:
+                season, episode = calculate_season_episode(absolute_episode, season_data)
+                if season is None:
+                    logging.warning(f"Could not infer season for episode {absolute_episode}. Skipping.")
+                    continue
+                logging.info(f"Inferred S{season:02d}E{episode:02d} from absolute episode {absolute_episode}.")
+            else:
+                season, episode = 1, absolute_episode
 
         if anime_data:
             title = anime_data['title'].get('romaji') or anime_data['title'].get('english')
@@ -144,11 +201,14 @@ def process_folder(folder_path, files, anime_data, dry_run, verbose):
             title = parsed_video.get('anime_title', 'Unknown Title')
 
         sanitized_title = sanitize_filename(title)
-        new_base_name = f"{sanitized_title} - S{season:02d}E{episode:02d}"
+        new_base_name = f"{sanitized_title} - S{season:02d}E{episode:02d} - Episode {episode:02d}"
 
         video_ext = os.path.splitext(video_path)[1]
-        new_video_name = f"{new_base_name}{video_ext}"
-        new_video_path = os.path.join(folder_path, new_video_name)
+        language_tag = get_language_tag(original_filename)
+        new_video_name = f"{new_base_name}{language_tag}{video_ext}"
+
+        new_video_path = get_unique_filepath(os.path.join(folder_path, new_video_name))
+        new_video_name = os.path.basename(new_video_path)
 
         print(f"  - Video: '{original_filename}' -> '{new_video_name}'")
         if not dry_run:
@@ -157,14 +217,20 @@ def process_folder(folder_path, files, anime_data, dry_run, verbose):
             except OSError as e:
                 logging.error(f"Could not rename video file '{video_path}': {e}")
 
-        for sub_path in list(subtitle_files): # Iterate over a copy
+        for sub_path in list(subtitle_files):
             parsed_sub = anitopy.parse(os.path.basename(sub_path))
             try:
                 sub_absolute_episode = int(parsed_sub.get('episode_number', '-1'))
-                if sub_absolute_episode == absolute_episode:
+                sub_season, sub_episode = calculate_season_episode(sub_absolute_episode, season_data)
+
+                if sub_season == season and sub_episode == episode:
                     sub_ext = os.path.splitext(sub_path)[1]
-                    new_sub_name = f"{new_base_name}{sub_ext}"
-                    new_sub_path = os.path.join(folder_path, new_sub_name)
+                    language_tag = get_language_tag(os.path.basename(sub_path))
+                    new_sub_name = f"{new_base_name}{language_tag}{sub_ext}"
+
+                    new_sub_path = get_unique_filepath(os.path.join(folder_path, new_sub_name))
+                    new_sub_name = os.path.basename(new_sub_path)
+
                     print(f"  - Subtitle: '{os.path.basename(sub_path)}' -> '{new_sub_name}'")
                     if not dry_run:
                         try:
@@ -181,6 +247,7 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Preview the renaming changes without applying them.")
     parser.add_argument("--recursive", action="store_true", help="Process subdirectories recursively.")
     parser.add_argument("--verbose", action="store_true", help="Enable detailed logging.")
+    parser.add_argument("--force-refresh", action="store_true", help="Force a refresh of the API cache.")
     args = parser.parse_args()
 
     log_level = logging.INFO if args.verbose else logging.WARNING
@@ -199,6 +266,7 @@ def main():
     logging.info(f"Starting anime renamer on directory: {target_directory}")
     logging.info(f"Dry run: {'Yes' if args.dry_run else 'No'}")
     logging.info(f"Recursive: {'Yes' if args.recursive else 'No'}")
+    logging.info(f"Force Refresh: {'Yes' if args.force_refresh else 'No'}")
 
     file_groups = find_files(target_directory, args.recursive)
     if not file_groups:
@@ -214,7 +282,7 @@ def main():
             logging.warning(f"Could not parse a title from '{sample_filename}'. Skipping folder."); continue
 
         logging.info(f"Searching AniList for '{parsed_title}'...")
-        search_results = anilist_api.search_anime(parsed_title)
+        search_results = anilist_api.search_anime(parsed_title, args.force_refresh)
 
         selected_anime = None
         if not search_results:
@@ -239,7 +307,7 @@ def main():
             title = selected_anime['title'].get('romaji') or selected_anime['title'].get('english')
             print(f"Processing with selected AniList title: {title}")
 
-        process_folder(folder, files, selected_anime, args.dry_run, args.verbose)
+        process_folder(folder, files, selected_anime, args.dry_run, args.force_refresh, args.verbose)
 
     print("\nRenaming process complete.")
 

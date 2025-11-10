@@ -4,14 +4,21 @@
 import requests
 import time
 import logging
+import cache
 
 API_URL = 'https://graphql.anilist.co'
 RATE_LIMIT_DELAY = 0.7  # ~85 requests per minute, safely under the 90 limit
 
-def search_anime(title):
+def search_anime(title, force_refresh=False):
     """
-    Search for an anime by title on AniList.
+    Search for an anime by title on AniList, with caching.
     """
+    cache_key = cache.get_cache_key('search', title)
+    if not force_refresh:
+        cached_data = cache.get_cached_data(cache_key)
+        if cached_data:
+            return cached_data
+
     query = '''
     query ($search: String) {
         Page(page: 1, perPage: 10) {
@@ -34,8 +41,10 @@ def search_anime(title):
     try:
         response = requests.post(API_URL, json={'query': query, 'variables': variables})
         response.raise_for_status()
+        data = response.json()['data']['Page']['media']
+        cache.save_to_cache(cache_key, data)
         time.sleep(RATE_LIMIT_DELAY)
-        return response.json()['data']['Page']['media']
+        return data
     except requests.exceptions.RequestException as e:
         logging.error(f"An error occurred while communicating with the AniList API: {e}")
         return None
@@ -43,11 +52,16 @@ def search_anime(title):
         logging.error("Unexpected response format from AniList API during search.")
         return None
 
-def get_anime_season_data(anime_id, fetched_ids=None):
+def get_anime_season_data(anime_id, force_refresh=False, fetched_ids=None):
     """
-    Recursively fetch the seasonal data for an anime, including prequels and sequels,
-    to build a complete timeline of the series.
+    Recursively fetch the seasonal data for an anime, with caching.
     """
+    cache_key = cache.get_cache_key('season', str(anime_id))
+    if not force_refresh:
+        cached_data = cache.get_cached_data(cache_key)
+        if cached_data:
+            return cached_data
+
     if fetched_ids is None:
         fetched_ids = set()
 
@@ -95,10 +109,10 @@ def get_anime_season_data(anime_id, fetched_ids=None):
             relation_type = edge['relationType']
             node = edge['node']
 
-            # Recursively fetch sequels and prequels
             if relation_type in ['SEQUEL', 'PREQUEL'] and node['format'] in ['TV', 'OVA', 'ONA']:
-                seasons.extend(get_anime_season_data(node['id'], fetched_ids))
+                seasons.extend(get_anime_season_data(node['id'], force_refresh, fetched_ids))
 
+        cache.save_to_cache(cache_key, seasons)
         return seasons
 
     except requests.exceptions.RequestException as e:

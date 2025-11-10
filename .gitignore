@@ -6,3 +6,6 @@ __pycache__/
 .Python
 env/
 venv/
+
+# Cache
+.anime_renamer_cache/
