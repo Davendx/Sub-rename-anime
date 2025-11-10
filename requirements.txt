@@ -1,0 +1,4 @@
+anitopy
+requests
+python-Levenshtein
+fuzzywuzzy
