@@ -1,8 +1,0 @@
-2025-11-03 14:43:33,117 - INFO - --- Scanning Local Directory: . ---
-2025-11-03 14:43:33,332 - INFO -
---- Overall Operation Summary ---
-2025-11-03 14:43:33,332 - INFO -
-No files were renamed.
-2025-11-03 14:43:33,333 - INFO - Nothing to do. All files may be already organized or no media was found.
-2025-11-03 14:43:33,333 - INFO -
-AniList cache saved.
