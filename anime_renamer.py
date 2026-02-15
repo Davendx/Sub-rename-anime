@@ -30,6 +30,14 @@ def sanitize_filename(filename):
     """
     return re.sub(r'[<>:"/\\|?*]', '', filename)
 
+def clean_filename(filename):
+    """
+    Pre-process filename to handle common formatting issues that confuse anitopy.
+    """
+    # Fix S01-E13 format (change to S01E13)
+    filename = re.sub(r'([Ss]\d+)-([Ee]\d+)', r'\1\2', filename)
+    return filename
+
 def find_files(directory, recursive, rclone_remote=None, rclone_config=None):
     """
     Find video and subtitle files in the given directory and group them by folder.
@@ -200,13 +208,24 @@ def process_folder(folder_path, files, anime_data, conf, dry_run, force_refresh,
 
     for file_path in tqdm(all_files, desc=f"Processing files in {os.path.basename(folder_path)}"):
         original_filename = os.path.basename(file_path)
-        parsed_file = anitopy.parse(original_filename)
+        cleaned_filename = clean_filename(original_filename)
+        parsed_file = anitopy.parse(cleaned_filename)
+
+        ep_str = parsed_file.get('episode_number')
+        anime_type = parsed_file.get('anime_type')
+        is_special = anime_type and (anime_type.lower() == 'ova' or anime_type.lower() == 'special')
+
+        if not ep_str and not is_special:
+             logging.warning(f"Could not parse episode number for '{original_filename}'. Skipping to prevent errors.")
+             continue
 
         try:
-            absolute_episode = int(parsed_file.get('episode_number', '0'))
+            absolute_episode = int(ep_str) if ep_str else 0
         except (ValueError, TypeError):
-            logging.warning(f"Could not parse episode number for '{original_filename}'. Skipping.")
-            continue
+            if not is_special:
+                logging.warning(f"Could not parse episode number '{ep_str}' for '{original_filename}'. Skipping.")
+                continue
+            absolute_episode = 0
 
         # Use a unique identifier for the show to track processed episodes
         show_id = anime_data['id'] if anime_data else parsed_file.get('anime_title')
@@ -214,8 +233,7 @@ def process_folder(folder_path, files, anime_data, conf, dry_run, force_refresh,
         if (show_id, absolute_episode) in processed_episodes:
             continue
 
-        anime_type = parsed_file.get('anime_type')
-        if anime_type and (anime_type.lower() == 'ova' or anime_type.lower() == 'special'):
+        if is_special:
             season = 0
             episode = absolute_episode
         else:
@@ -247,41 +265,63 @@ def process_folder(folder_path, files, anime_data, conf, dry_run, force_refresh,
             language_tag = get_language_tag(original_filename)
             new_video_name = f"{new_base_name}{language_tag}{video_ext}"
 
+            dest_folder = os.path.join(os.path.dirname(video_file), "S00_OVAs") if bundle_ova and season == 0 else os.path.dirname(video_file) if rclone_remote else (os.path.join(folder_path, "S00_OVAs") if bundle_ova and season == 0 else folder_path)
+
+            if not rclone_remote and not os.path.exists(dest_folder):
+                os.makedirs(dest_folder)
+
+            new_video_path_candidate = os.path.join(dest_folder, new_video_name)
+
+            should_rename = True
             if rclone_remote:
-                dest_folder = os.path.join(os.path.dirname(video_file), "S00_OVAs") if bundle_ova and season == 0 else os.path.dirname(video_file)
-                unique_video_path = get_unique_rclone_filepath(rclone_remote, os.path.join(dest_folder, new_video_name), rclone_config)
-                new_video_path = f"{rclone_remote}:{unique_video_path}"
-                original_video_path = f"{rclone_remote}:{video_file}"
+                 # Check if already correct (simple string match for now, could be better)
+                 original_video_path = f"{rclone_remote}:{video_file}"
+                 if os.path.normpath(video_file) == os.path.normpath(os.path.join(dest_folder, new_video_name)):
+                     print(f"  - Video: '{original_filename}' is already named correctly.")
+                     should_rename = False
             else:
-                dest_folder = os.path.join(folder_path, "S00_OVAs") if bundle_ova and season == 0 else folder_path
-                if not os.path.exists(dest_folder):
-                    os.makedirs(dest_folder)
-                new_video_path = get_unique_filepath(os.path.join(dest_folder, new_video_name))
-                original_video_path = video_file
+                 original_video_path = video_file
+                 if os.path.abspath(original_video_path) == os.path.abspath(new_video_path_candidate):
+                     print(f"  - Video: '{original_filename}' is already named correctly.")
+                     should_rename = False
 
-            new_video_name = os.path.basename(new_video_path)
-
-            print(f"  - Video: '{original_filename}' -> '{new_video_name}'")
-            if not dry_run:
+            if should_rename:
                 if rclone_remote:
-                    if not rclone_handler.rclone_moveto(original_video_path, new_video_path, rclone_config):
-                        if rclone_handler.rclone_copyto(original_video_path, new_video_path, rclone_config):
-                            rclone_handler.rclone_delete(original_video_path, rclone_config)
+                    unique_video_path = get_unique_rclone_filepath(rclone_remote, new_video_path_candidate, rclone_config)
+                    new_video_path = f"{rclone_remote}:{unique_video_path}"
                 else:
-                    try:
-                        os.rename(original_video_path, new_video_path)
-                    except OSError as e:
-                        logging.error(f"Could not rename video file '{original_video_path}': {e}")
+                    new_video_path = get_unique_filepath(new_video_path_candidate)
 
-            if export_nfo:
+                new_video_name = os.path.basename(new_video_path)
+                print(f"  - Video: '{original_filename}' -> '{new_video_name}'")
+
+                if not dry_run:
+                    if rclone_remote:
+                        if not rclone_handler.rclone_moveto(original_video_path, new_video_path, rclone_config):
+                            if rclone_handler.rclone_copyto(original_video_path, new_video_path, rclone_config):
+                                rclone_handler.rclone_delete(original_video_path, rclone_config)
+                    else:
+                        try:
+                            os.rename(original_video_path, new_video_path)
+                        except OSError as e:
+                            logging.error(f"Could not rename video file '{original_video_path}': {e}")
+            else:
+                 # If we didn't rename, the new path is effectively the original
+                 new_video_path = original_video_path if not rclone_remote else f"{rclone_remote}:{video_file}"
+
+            if export_nfo and should_rename: # Only export if we touched it? Or always? Let's stick to if we processed it.
                 nfo_path = os.path.splitext(new_video_path)[0] + ".nfo"
                 create_nfo_file(nfo_path, anime_data, season, episode, True)
 
         # Rename subtitle files
         for sub_path in list(files['subtitles']):
-            parsed_sub = anitopy.parse(os.path.basename(sub_path))
+            cleaned_sub_name = clean_filename(os.path.basename(sub_path))
+            parsed_sub = anitopy.parse(cleaned_sub_name)
             try:
-                sub_absolute_episode = int(parsed_sub.get('episode_number', '-1'))
+                sub_ep_str = parsed_sub.get('episode_number')
+                if not sub_ep_str: continue # Skip if unparsable
+
+                sub_absolute_episode = int(sub_ep_str)
                 sub_season, sub_episode = calculate_season_episode(sub_absolute_episode, season_data)
 
                 if sub_season == season and sub_episode == episode:
@@ -289,34 +329,49 @@ def process_folder(folder_path, files, anime_data, conf, dry_run, force_refresh,
                     language_tag = get_language_tag(os.path.basename(sub_path))
                     new_sub_name = f"{new_base_name}{language_tag}{sub_ext}"
 
+                    dest_folder = os.path.join(os.path.dirname(sub_path), "S00_OVAs") if bundle_ova and season == 0 else os.path.dirname(sub_path) if rclone_remote else (os.path.join(folder_path, "S00_OVAs") if bundle_ova and season == 0 else folder_path)
+
+                    if not rclone_remote and not os.path.exists(dest_folder):
+                        os.makedirs(dest_folder)
+
+                    new_sub_path_candidate = os.path.join(dest_folder, new_sub_name)
+                    should_rename_sub = True
+
                     if rclone_remote:
-                        dest_folder = os.path.join(os.path.dirname(sub_path), "S00_OVAs") if bundle_ova and season == 0 else os.path.dirname(sub_path)
-                        unique_sub_path = get_unique_rclone_filepath(rclone_remote, os.path.join(dest_folder, new_sub_name), rclone_config)
-                        new_sub_path = f"{rclone_remote}:{unique_sub_path}"
-                        original_sub_path = f"{rclone_remote}:{sub_path}"
+                         original_sub_path = f"{rclone_remote}:{sub_path}"
+                         if os.path.normpath(sub_path) == os.path.normpath(os.path.join(dest_folder, new_sub_name)):
+                             print(f"  - Subtitle: '{os.path.basename(sub_path)}' is already named correctly.")
+                             should_rename_sub = False
                     else:
-                        dest_folder = os.path.join(folder_path, "S00_OVAs") if bundle_ova and season == 0 else folder_path
-                        if not os.path.exists(dest_folder):
-                            os.makedirs(dest_folder)
-                        new_sub_path = get_unique_filepath(os.path.join(dest_folder, new_sub_name))
-                        original_sub_path = sub_path
+                         original_sub_path = sub_path
+                         if os.path.abspath(original_sub_path) == os.path.abspath(new_sub_path_candidate):
+                             print(f"  - Subtitle: '{os.path.basename(sub_path)}' is already named correctly.")
+                             should_rename_sub = False
 
-                    new_sub_name = os.path.basename(new_sub_path)
-
-                    print(f"  - Subtitle: '{os.path.basename(sub_path)}' -> '{new_sub_name}'")
-                    if not dry_run:
+                    if should_rename_sub:
                         if rclone_remote:
-                            if not rclone_handler.rclone_moveto(original_sub_path, new_sub_path, rclone_config):
-                                if rclone_handler.rclone_copyto(original_sub_path, new_sub_path, rclone_config):
-                                    rclone_handler.rclone_delete(original_sub_path, rclone_config)
+                            unique_sub_path = get_unique_rclone_filepath(rclone_remote, new_sub_path_candidate, rclone_config)
+                            new_sub_path = f"{rclone_remote}:{unique_sub_path}"
                         else:
-                            try:
-                                os.rename(original_sub_path, new_sub_path)
-                            except OSError as e:
-                                logging.error(f"Could not rename subtitle file '{original_sub_path}': {e}")
+                            new_sub_path = get_unique_filepath(new_sub_path_candidate)
+
+                        new_sub_name = os.path.basename(new_sub_path)
+                        print(f"  - Subtitle: '{os.path.basename(sub_path)}' -> '{new_sub_name}'")
+
+                        if not dry_run:
+                            if rclone_remote:
+                                if not rclone_handler.rclone_moveto(original_sub_path, new_sub_path, rclone_config):
+                                    if rclone_handler.rclone_copyto(original_sub_path, new_sub_path, rclone_config):
+                                        rclone_handler.rclone_delete(original_sub_path, rclone_config)
+                            else:
+                                try:
+                                    os.rename(original_sub_path, new_sub_path)
+                                except OSError as e:
+                                    logging.error(f"Could not rename subtitle file '{original_sub_path}': {e}")
+
                     files['subtitles'].remove(sub_path)
 
-                    if export_nfo and not video_file:
+                    if export_nfo and not video_file and should_rename_sub:
                         nfo_path = os.path.splitext(new_sub_path)[0] + ".nfo"
                         create_nfo_file(nfo_path, anime_data, season, episode, False)
 
