@@ -8,6 +8,7 @@ import cache
 
 API_URL = 'https://graphql.anilist.co'
 RATE_LIMIT_DELAY = 0.7  # ~85 requests per minute, safely under the 90 limit
+TIMEOUT = 10  # Timeout for HTTP requests in seconds
 
 def search_anime(title, force_refresh=False):
     """
@@ -39,7 +40,7 @@ def search_anime(title, force_refresh=False):
     variables = {'search': title}
 
     try:
-        response = requests.post(API_URL, json={'query': query, 'variables': variables})
+        response = requests.post(API_URL, json={'query': query, 'variables': variables}, timeout=TIMEOUT)
         response.raise_for_status()
         data = response.json()['data']['Page']['media']
         cache.save_to_cache(cache_key, data)
@@ -97,7 +98,7 @@ def get_anime_season_data(anime_id, force_refresh=False, fetched_ids=None):
 
     variables = {'id': anime_id}
     try:
-        response = requests.post(API_URL, json={'query': query, 'variables': variables})
+        response = requests.post(API_URL, json={'query': query, 'variables': variables}, timeout=TIMEOUT)
         response.raise_for_status()
         data = response.json()['data']['Media']
         fetched_ids.add(anime_id)
