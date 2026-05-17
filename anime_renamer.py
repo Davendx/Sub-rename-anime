@@ -24,18 +24,24 @@ import config
 VIDEO_EXTENSIONS = ('.mkv', '.mp4')
 SUBTITLE_EXTENSIONS = ('.srt', '.ass')
 
+
+# Pre-compiled regular expressions for performance
+SANITIZE_FILENAME_RE = re.compile(r'[<>:"/\\|?*]')
+CLEAN_FILENAME_RE = re.compile(r'([Ss]\d+)-([Ee]\d+)')
+LANGUAGE_TAG_RE = re.compile(r'\[(eng|jpn)\]', re.IGNORECASE)
+
 def sanitize_filename(filename):
     """
     Remove characters that are invalid in filenames across different OS.
     """
-    return re.sub(r'[<>:"/\\|?*]', '', filename)
+    return SANITIZE_FILENAME_RE.sub('', filename)
 
 def clean_filename(filename):
     """
     Pre-process filename to handle common formatting issues that confuse anitopy.
     """
     # Fix S01-E13 format (change to S01E13)
-    filename = re.sub(r'([Ss]\d+)-([Ee]\d+)', r'\1\2', filename)
+    filename = CLEAN_FILENAME_RE.sub(r'\1\2', filename)
     return filename
 
 def find_files(directory, recursive, rclone_remote=None, rclone_config=None):
@@ -132,7 +138,7 @@ def get_language_tag(filename):
     """
     Detect a language tag from the filename.
     """
-    match = re.search(r'\[(eng|jpn)\]', filename, re.IGNORECASE)
+    match = LANGUAGE_TAG_RE.search(filename)
     if match:
         return f" [{match.group(1).lower()}]"
     return ""
