@@ -152,16 +152,23 @@ def get_unique_filepath(filepath):
             return new_filepath
         version += 1
 
-def get_unique_rclone_filepath(remote, filepath, rclone_config=None):
+def get_unique_rclone_filepath(remote, filepath, rclone_config=None, rclone_lsf_cache=None):
     """
     Get a unique filepath on an rclone remote by appending a version number if the file already exists.
     """
     dir_path = os.path.dirname(filepath)
     remote_dir_path = f"{remote}:{dir_path}"
 
-    existing_files = rclone_handler.rclone_lsf(remote_dir_path, rclone_config)
+    if rclone_lsf_cache is not None:
+        if remote_dir_path not in rclone_lsf_cache:
+            rclone_lsf_cache[remote_dir_path] = rclone_handler.rclone_lsf(remote_dir_path, rclone_config)
+        existing_files = rclone_lsf_cache[remote_dir_path]
+    else:
+        existing_files = rclone_handler.rclone_lsf(remote_dir_path, rclone_config)
 
     if os.path.basename(filepath) not in existing_files:
+        if rclone_lsf_cache is not None:
+            rclone_lsf_cache[remote_dir_path].append(os.path.basename(filepath))
         return filepath
 
     base, ext = os.path.splitext(filepath)
@@ -169,6 +176,8 @@ def get_unique_rclone_filepath(remote, filepath, rclone_config=None):
     while True:
         new_filename = f"{os.path.basename(base)}_v{version}{ext}"
         if new_filename not in existing_files:
+            if rclone_lsf_cache is not None:
+                rclone_lsf_cache[remote_dir_path].append(new_filename)
             return os.path.join(dir_path, new_filename)
         version += 1
 
@@ -200,6 +209,7 @@ def process_folder(folder_path, files, anime_data, conf, dry_run, force_refresh,
     """
     all_files = sorted(files['videos'] + files['subtitles'])
     processed_episodes = set()
+    rclone_lsf_cache = {}
 
     season_data = []
     if anime_data:
@@ -287,7 +297,7 @@ def process_folder(folder_path, files, anime_data, conf, dry_run, force_refresh,
 
             if should_rename:
                 if rclone_remote:
-                    unique_video_path = get_unique_rclone_filepath(rclone_remote, new_video_path_candidate, rclone_config)
+                    unique_video_path = get_unique_rclone_filepath(rclone_remote, new_video_path_candidate, rclone_config, rclone_lsf_cache)
                     new_video_path = f"{rclone_remote}:{unique_video_path}"
                 else:
                     new_video_path = get_unique_filepath(new_video_path_candidate)
@@ -350,7 +360,7 @@ def process_folder(folder_path, files, anime_data, conf, dry_run, force_refresh,
 
                     if should_rename_sub:
                         if rclone_remote:
-                            unique_sub_path = get_unique_rclone_filepath(rclone_remote, new_sub_path_candidate, rclone_config)
+                            unique_sub_path = get_unique_rclone_filepath(rclone_remote, new_sub_path_candidate, rclone_config, rclone_lsf_cache)
                             new_sub_path = f"{rclone_remote}:{unique_sub_path}"
                         else:
                             new_sub_path = get_unique_filepath(new_sub_path_candidate)
